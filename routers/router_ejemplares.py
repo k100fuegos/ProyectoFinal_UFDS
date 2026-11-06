@@ -121,6 +121,12 @@ async def update_ejemplar(
     ejemplar = obtener_ejemplar_o_404(session, ejemplar_id)
     datos_actualizados = datos.model_dump(exclude_unset=True)
 
+    if ejemplar.estado == EstadoEjemplar.ELIMINADO:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="El ejemplar está eliminado y no puede modificarse",
+        )
+
     if "estado" in datos_actualizados and datos_actualizados["estado"] is not None:
         nuevo_estado = datos_actualizados["estado"]
         if ejemplar.estado == EstadoEjemplar.PRESTADO:
@@ -132,6 +138,11 @@ async def update_ejemplar(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="El estado 'Prestado' solo puede asignarse mediante el registro de un préstamo",
+            )
+        if nuevo_estado == EstadoEjemplar.ELIMINADO:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="El estado 'Eliminado' solo puede asignarse mediante la baja del ejemplar",
             )
 
     for campo, valor in datos_actualizados.items():

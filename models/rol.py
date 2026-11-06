@@ -3,7 +3,7 @@ from sqlmodel import SQLModel, Field
 
 
 class RolBase(SQLModel):
-    nombre: str = Field(max_length=50, unique=True)
+    nombre: str = Field(min_length=2, max_length=50, unique=True)
     descripcion: Optional[str] = Field(default=None, max_length=255)
 
 
@@ -17,5 +17,5 @@ class RolCreate(RolBase):
 
 
 class RolUpdate(SQLModel):
-    nombre: Optional[str] = Field(default=None, max_length=50)
+    nombre: Optional[str] = Field(default=None, min_length=2, max_length=50)
     descripcion: Optional[str] = Field(default=None, max_length=255)
