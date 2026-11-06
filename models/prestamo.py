@@ -59,6 +59,7 @@ class DevolucionRequest(SQLModel):
 class PrestamoRead(PrestamoBase):
     prestamo_id: int
     usuario_id: int
+    libro_id: Optional[int] = None
     fecha_prestamo: datetime
     fecha_vencimiento: datetime
     fecha_devolucion: Optional[datetime]

@@ -3,15 +3,22 @@ from typing import Optional
 from dotenv import load_dotenv
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
+from sqlmodel import Session
 import jwt
 import os
 
+from config.db import get_session
+from models.usuario import Usuario
+
 load_dotenv()
 
-SECRET_KEY_TOKEN = os.getenv(
-    "SECRET_KEY_TOKEN",
-    "biblioteca_secret_key_token_default_2026_ufds_seguro",
-)
+SECRET_KEY_TOKEN = (os.getenv("SECRET_KEY_TOKEN") or "").strip()
+if not SECRET_KEY_TOKEN:
+    raise RuntimeError(
+        "SECRET_KEY_TOKEN no está definido. Configure la variable de entorno "
+        "o el archivo .env antes de iniciar la API."
+    )
+
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
 
@@ -46,7 +53,10 @@ def decode_access_token(token: str) -> dict:
     return payload
 
 
-def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
+def get_current_user(
+    token: str = Depends(oauth2_scheme),
+    session: Session = Depends(get_session),
+) -> dict:
     credencial_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="No autenticado o token inválido",
@@ -56,12 +66,27 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
     try:
         payload = decode_access_token(token)
         id_usuario: Optional[int] = payload.get("id")
-        username: Optional[str] = payload.get("username")
-        id_rol: Optional[int] = payload.get("id_rol")
 
-        if id_usuario is None or username is None or id_rol is None:
+        if not isinstance(id_usuario, int):
             raise credencial_exception
-        return {"id": id_usuario, "username": username, "id_rol": id_rol}
+
+        # El token identifica al usuario, pero el estado y el rol se consultan
+        # siempre en la base de datos para que una desactivación o un cambio
+        # de rol tengan efecto inmediato sin esperar a que expire el token.
+        usuario = session.get(Usuario, id_usuario)
+        if not usuario:
+            raise credencial_exception
+        if not usuario.activo:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado",
+            )
+
+        return {
+            "id": usuario.usuario_id,
+            "username": usuario.username,
+            "id_rol": usuario.rol_id,
+        }
     except jwt.ExpiredSignatureError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

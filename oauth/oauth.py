@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from fastapi import APIRouter, Request, status, HTTPException
+from sqlalchemy import update
 from sqlmodel import select
 from config.session_dependencia import SessionDeDependencia
 from config.security import create_access_token
@@ -69,16 +70,31 @@ async def login(
 
     if not usuario.activo:
         _fallo_autenticacion(
-            "El usuario se encuentra inactivo. Comuníquese con el administrador.",
+            "No se pudo iniciar sesión",
             status.HTTP_403_FORBIDDEN,
         )
 
-    # 3. Credenciales válidas: reiniciar contador de fallos y actualizar last_login
-    login_rate_limiter.record_success(client_key)
+    # 3. Credenciales válidas: actualizar last_login solo si la cuenta sigue activa.
+    # La condición se evalúa en la misma sentencia para que una desactivación
+    # concurrente no termine emitiendo un token para un usuario ya inactivo.
+    resultado = session.execute(
+        update(Usuario)
+        .where(
+            Usuario.usuario_id == usuario.usuario_id,
+            Usuario.activo.is_(True),
+        )
+        .values(last_login=datetime.now(timezone.utc))
+        .execution_options(synchronize_session=False)
+    )
+    if resultado.rowcount != 1:
+        session.rollback()
+        _fallo_autenticacion(
+            "No se pudo iniciar sesión",
+            status.HTTP_403_FORBIDDEN,
+        )
 
-    usuario.last_login = datetime.now(timezone.utc)
-    session.add(usuario)
     session.commit()
+    login_rate_limiter.record_success(client_key)
     session.refresh(usuario)
 
     token, expires_in = create_access_token(

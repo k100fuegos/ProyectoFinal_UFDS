@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, HTTPException, Query, status
+from sqlalchemy import update
 from sqlmodel import select
 from config.session_dependencia import SessionDeDependencia
 from config.security_dependencia import Biblio_Token_Dependencia
@@ -29,6 +30,34 @@ def obtener_prestamo_o_404(
     return prestamo
 
 
+def construir_prestamo_read(
+    session: SessionDeDependencia, prestamo: Prestamo
+) -> PrestamoRead:
+    """Incluye el libro asociado al ejemplar en la respuesta del préstamo."""
+    ejemplar = session.get(Ejemplar, prestamo.ejemplar_id)
+    return PrestamoRead(
+        **prestamo.model_dump(),
+        libro_id=ejemplar.libro_id if ejemplar else None,
+    )
+
+
+def actualizar_prestamos_vencidos(session: SessionDeDependencia) -> None:
+    """Marca como Vencido los préstamos activos cuya fecha de vencimiento pasó."""
+    ahora = datetime.now(timezone.utc)
+    session.execute(
+        update(Prestamo)
+        .where(
+            Prestamo.estado == EstadoPrestamo.ACTIVO,
+            Prestamo.fecha_vencimiento < ahora,
+        )
+        .values(estado=EstadoPrestamo.VENCIDO)
+        .execution_options(synchronize_session=False)
+    )
+    # Se confirma siempre para cerrar la transacción y liberar bloqueos,
+    # incluso cuando no había préstamos por vencer.
+    session.commit()
+
+
 @router.get(
     "/prestamos",
     response_model=list[PrestamoRead],
@@ -44,6 +73,8 @@ async def get_prestamos(
     offset: int = Query(0, ge=0),
     limit: int = Query(20, ge=1, le=100),
 ):
+    actualizar_prestamos_vencidos(session)
+
     consulta = select(Prestamo)
     if lector_id is not None:
         consulta = consulta.where(Prestamo.lector_id == lector_id)
@@ -51,7 +82,9 @@ async def get_prestamos(
         consulta = consulta.where(Prestamo.ejemplar_id == ejemplar_id)
     if estado is not None:
         consulta = consulta.where(Prestamo.estado == estado)
-    return session.exec(consulta.offset(offset).limit(limit)).all()
+
+    prestamos = session.exec(consulta.offset(offset).limit(limit)).all()
+    return [construir_prestamo_read(session, prestamo) for prestamo in prestamos]
 
 
 @router.get(
@@ -63,11 +96,21 @@ async def get_prestamos(
 async def get_prestamos_activos(
     session: SessionDeDependencia,
     token: Biblio_Token_Dependencia,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=100),
 ):
-    consulta = select(Prestamo).where(
-        Prestamo.estado.in_([EstadoPrestamo.ACTIVO, EstadoPrestamo.VENCIDO])  # type: ignore
+    actualizar_prestamos_vencidos(session)
+
+    consulta = (
+        select(Prestamo)
+        .where(
+            Prestamo.estado.in_([EstadoPrestamo.ACTIVO, EstadoPrestamo.VENCIDO])  # type: ignore
+        )
+        .offset(offset)
+        .limit(limit)
     )
-    return session.exec(consulta).all()
+    prestamos = session.exec(consulta).all()
+    return [construir_prestamo_read(session, prestamo) for prestamo in prestamos]
 
 
 @router.get(
@@ -81,7 +124,9 @@ async def get_prestamo(
     session: SessionDeDependencia,
     token: Biblio_Token_Dependencia,
 ):
-    return obtener_prestamo_o_404(session, prestamo_id)
+    actualizar_prestamos_vencidos(session)
+    prestamo = obtener_prestamo_o_404(session, prestamo_id)
+    return construir_prestamo_read(session, prestamo)
 
 
 @router.post(
@@ -149,6 +194,24 @@ async def create_prestamo(
             detail="El ejemplar ya posee un préstamo activo pendiente de devolución",
         )
 
+    # Actualización atómica: si dos solicitudes compiten por el mismo ejemplar,
+    # solo una puede cambiar el estado de 'Disponible' a 'Prestado'.
+    resultado = session.execute(
+        update(Ejemplar)
+        .where(
+            Ejemplar.ejemplar_id == datos.ejemplar_id,
+            Ejemplar.estado == EstadoEjemplar.DISPONIBLE,
+        )
+        .values(estado=EstadoEjemplar.PRESTADO)
+        .execution_options(synchronize_session=False)
+    )
+    if resultado.rowcount != 1:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="El ejemplar dejó de estar disponible para préstamo",
+        )
+
     ahora = datetime.now(timezone.utc)
     vencimiento = ahora + timedelta(days=datos.dias_prestamo)
     usuario_id = token.get("id")
@@ -163,13 +226,11 @@ async def create_prestamo(
         estado=EstadoPrestamo.ACTIVO,
         observaciones=datos.observaciones,
     )
-    ejemplar.estado = EstadoEjemplar.PRESTADO
 
     session.add(prestamo)
-    session.add(ejemplar)
     session.commit()
     session.refresh(prestamo)
-    return prestamo
+    return construir_prestamo_read(session, prestamo)
 
 
 @router.patch(
@@ -214,4 +275,4 @@ async def registrar_devolucion(
     session.add(ejemplar)
     session.commit()
     session.refresh(prestamo)
-    return prestamo
+    return construir_prestamo_read(session, prestamo)

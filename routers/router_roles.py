@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Query, status
 from sqlmodel import select
 from config.session_dependencia import SessionDeDependencia
 from config.security_dependencia import (
@@ -20,8 +20,10 @@ router = APIRouter()
 async def get_roles(
     session: SessionDeDependencia,
     token: Biblio_Token_Dependencia,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=100),
 ):
-    return session.exec(select(Rol)).all()
+    return session.exec(select(Rol).offset(offset).limit(limit)).all()
 
 
 @router.get(
