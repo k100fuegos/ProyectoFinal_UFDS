@@ -1,6 +1,10 @@
 import os
+import re
+import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
+from io import BytesIO
+from pathlib import Path
 
 # Debe configurarse antes de importar la aplicación: config.security exige
 # la variable y falla al arrancar si no existe.
@@ -8,11 +12,13 @@ os.environ.setdefault("SECRET_KEY_TOKEN", "test-secret-key-para-pruebas-ufds-202
 os.environ.setdefault("ENVIRONMENT", "testing")
 
 from fastapi.testclient import TestClient
+from PIL import Image
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from config.db import get_session
 from config.security import create_access_token
+from librerias import portadas
 from librerias.pwd import get_password_hash
 from librerias.rate_limiter import login_rate_limiter
 from main import app
@@ -57,6 +63,13 @@ class ApiBibliotecariaTestCase(unittest.TestCase):
         self._crear_datos_base()
         self.admin_headers = self._headers(1, "admin", 1)
         self.biblio_headers = self._headers(2, "bibliotecario", 2)
+
+        # Las portadas de las pruebas no deben mezclarse con las reales.
+        self._media_temporal = tempfile.TemporaryDirectory()
+        self.addCleanup(self._media_temporal.cleanup)
+        ruta_original = portadas.RUTA_PORTADAS
+        portadas.RUTA_PORTADAS = Path(self._media_temporal.name)
+        self.addCleanup(setattr, portadas, "RUTA_PORTADAS", ruta_original)
 
     # ------------------------------------------------------------------
     # Utilidades
@@ -137,21 +150,35 @@ class ApiBibliotecariaTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 201, response.text)
         return response.json()
 
-    def _crear_libro(self, categoria_id: int, autor_id: int, headers=None):
+    def _crear_libro(
+        self,
+        categoria_id: int,
+        autor_id: int,
+        headers=None,
+        portada=None,
+    ):
+        data = {
+            "isbn": "9780307474728",
+            "titulo": "Cien años de soledad",
+            "editorial": "Sudamericana",
+            "anio_publicacion": "1967",
+            "categoria_id": str(categoria_id),
+            "autores_ids": [str(autor_id)],
+        }
+        files = {"portada": portada} if portada else None
         response = self.client.post(
             "/libros",
-            json={
-                "isbn": "9780307474728",
-                "titulo": "Cien años de soledad",
-                "editorial": "Sudamericana",
-                "anio_publicacion": 1967,
-                "categoria_id": categoria_id,
-                "autores_ids": [autor_id],
-            },
+            data=data,
+            files=files,
             headers=headers or self.biblio_headers,
         )
         self.assertEqual(response.status_code, 201, response.text)
         return response.json()
+
+    def _imagen_png(self, ancho: int = 1200, alto: int = 1800) -> bytes:
+        buffer = BytesIO()
+        Image.new("RGB", (ancho, alto), (180, 30, 45)).save(buffer, format="PNG")
+        return buffer.getvalue()
 
     def _crear_lector(self, headers=None):
         response = self.client.post(
@@ -266,7 +293,7 @@ class ApiBibliotecariaTestCase(unittest.TestCase):
 
         response = self.client.put(
             f"/libros/{libro['libro_id']}",
-            json={"titulo": "Cien años de soledad (edición revisada)"},
+            data={"titulo": "Cien años de soledad (edición revisada)"},
             headers=self.biblio_headers,
         )
         self.assertEqual(response.status_code, 200)
@@ -279,6 +306,119 @@ class ApiBibliotecariaTestCase(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertFalse(response.json()["activo"])
+
+    def test_portada_se_guarda_como_webp_redimensionada(self):
+        from zoneinfo import ZoneInfo
+
+        categoria = self._crear_categoria()
+        autor = self._crear_autor()
+        libro = self._crear_libro(
+            categoria["categoria_id"],
+            autor["autor_id"],
+            portada=("entrada.png", self._imagen_png(), "image/png"),
+        )
+
+        nombre = libro["portada"]
+        self.assertRegex(
+            nombre,
+            r"^entrada_\d{8}_\d{6}(_\d+)?\.webp$",
+        )
+
+        # El nombre incluye la fecha de creación en la zona de El Salvador.
+        marca = re.search(r"_(\d{8}_\d{6})", nombre)
+        self.assertIsNotNone(marca)
+        fecha = datetime.strptime(marca.group(1), "%Y%m%d_%H%M%S").replace(
+            tzinfo=ZoneInfo("America/El_Salvador")
+        )
+        ahora = datetime.now(ZoneInfo("America/El_Salvador"))
+        self.assertLess(abs((ahora - fecha).total_seconds()), 120)
+
+        ruta = Path(self._media_temporal.name) / nombre
+        self.assertTrue(ruta.exists())
+        with Image.open(ruta) as imagen:
+            self.assertEqual(imagen.format, "WEBP")
+            self.assertLessEqual(imagen.width, portadas.PORTADA_ANCHO)
+            self.assertLessEqual(imagen.height, portadas.PORTADA_ALTO)
+            # La imagen original 1200x1800 conserva su proporción 2:3.
+            self.assertAlmostEqual(imagen.width / imagen.height, 2 / 3, places=2)
+
+        response = self.client.get(
+            f"/libros/{libro['libro_id']}", headers=self.biblio_headers
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["portada"], nombre)
+
+    def test_portada_se_reemplaza_y_se_elimina_la_anterior(self):
+        categoria = self._crear_categoria()
+        autor = self._crear_autor()
+        libro = self._crear_libro(
+            categoria["categoria_id"],
+            autor["autor_id"],
+            portada=("original.png", self._imagen_png(), "image/png"),
+        )
+        portada_anterior = libro["portada"]
+
+        response = self.client.put(
+            f"/libros/{libro['libro_id']}",
+            files={
+                "portada": (
+                    "nueva.png",
+                    self._imagen_png(600, 900),
+                    "image/png",
+                )
+            },
+            headers=self.biblio_headers,
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+
+        portada_nueva = response.json()["portada"]
+        self.assertNotEqual(portada_nueva, portada_anterior)
+        self.assertFalse(
+            (Path(self._media_temporal.name) / portada_anterior).exists()
+        )
+        self.assertTrue(
+            (Path(self._media_temporal.name) / portada_nueva).exists()
+        )
+
+    def test_portada_rechaza_archivo_que_no_es_imagen(self):
+        categoria = self._crear_categoria()
+        autor = self._crear_autor()
+
+        response = self.client.post(
+            "/libros",
+            data={
+                "isbn": "9780307474728",
+                "titulo": "Libro con archivo inválido",
+                "categoria_id": str(categoria["categoria_id"]),
+                "autores_ids": [str(autor["autor_id"])],
+            },
+            files={"portada": ("portada.txt", b"no es una imagen", "text/plain")},
+            headers=self.biblio_headers,
+        )
+        self.assertEqual(response.status_code, 400, response.text)
+
+    def test_portada_rechaza_archivo_demasiado_pesado(self):
+        categoria = self._crear_categoria()
+        autor = self._crear_autor()
+
+        limite_original = portadas.MAX_PORTADA_BYTES
+        portadas.MAX_PORTADA_BYTES = 1024
+        self.addCleanup(
+            setattr, portadas, "MAX_PORTADA_BYTES", limite_original
+        )
+
+        response = self.client.post(
+            "/libros",
+            data={
+                "isbn": "9780307474728",
+                "titulo": "Libro con portada pesada",
+                "categoria_id": str(categoria["categoria_id"]),
+                "autores_ids": [str(autor["autor_id"])],
+            },
+            files={"portada": ("grande.png", b"x" * 2048, "image/png")},
+            headers=self.biblio_headers,
+        )
+        self.assertEqual(response.status_code, 413, response.text)
 
     def test_07_prestamo_valido(self):
         lector, libro, ejemplar = self._preparar_prestamo()
@@ -344,11 +484,10 @@ class ApiBibliotecariaTestCase(unittest.TestCase):
     def test_10_datos_invalidos(self):
         response = self.client.post(
             "/libros",
-            json={
+            data={
                 "isbn": "9780307474728",
                 "titulo": "Libro sin autores",
-                "categoria_id": 1,
-                "autores_ids": [],
+                "categoria_id": "1",
             },
             headers=self.biblio_headers,
         )

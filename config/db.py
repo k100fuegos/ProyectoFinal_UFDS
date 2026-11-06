@@ -115,12 +115,33 @@ def inicializar_datos_semilla(target_engine=None):
         print(f"Aviso al inicializar datos semilla: {e}")
 
 
+def asegurar_columna_portada():
+    """Agrega la columna ``portada`` a bases de datos creadas antes de la feature.
+
+    ``SQLModel.metadata.create_all`` no modifica tablas existentes, por lo que
+    esta migración mínima mantiene compatibles las instalaciones ya en uso.
+    """
+    from sqlalchemy import inspect
+
+    inspector = inspect(engine)
+    if "libros" not in inspector.get_table_names():
+        return
+
+    columnas = {columna["name"] for columna in inspector.get_columns("libros")}
+    if "portada" not in columnas:
+        with engine.begin() as conn:
+            conn.execute(
+                text("ALTER TABLE libros ADD COLUMN portada VARCHAR(255) NULL")
+            )
+
+
 def crear_db_y_tablas():
     asegurar_base_de_datos()
     try:
         import models  # noqa: F401 - Registra todos los modelos en SQLModel.metadata
 
         SQLModel.metadata.create_all(engine)
+        asegurar_columna_portada()
         inicializar_datos_semilla()
     except Exception as e:
         print(f"Error en la inicialización de la base de datos: {e}")

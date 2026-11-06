@@ -16,6 +16,8 @@ class LibroBase(SQLModel):
 class Libro(LibroBase, table=True):
     __tablename__ = "libros"  # type: ignore
     libro_id: Optional[int] = Field(default=None, primary_key=True)
+    # Solo se almacena el nombre del archivo; la imagen vive en media/portadas.
+    portada: Optional[str] = Field(default=None, max_length=255)
     activo: bool = Field(default=True)
 
 
@@ -36,5 +38,6 @@ class LibroUpdate(SQLModel):
 class LibroRead(LibroBase):
     libro_id: int
     activo: bool
+    portada: Optional[str] = None
     autores_ids: list[int] = []
     ejemplares_disponibles: int = 0

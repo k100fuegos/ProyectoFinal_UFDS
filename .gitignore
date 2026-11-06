@@ -175,3 +175,5 @@ poetry.toml
 pyrightconfig.json
 
 # End of https://www.toptal.com/developers/gitignore/api/python
+# Portadas subidas por los usuarios (se generan en tiempo de ejecución)
+media/portadas/
