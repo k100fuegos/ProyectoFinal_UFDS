@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException, Query, status
+from sqlalchemy import update
 from sqlmodel import select
 from config.session_dependencia import SessionDeDependencia
 from config.security_dependencia import Admin_Token_Dependencia, Token_Dependencia
@@ -190,14 +191,61 @@ async def desactivar_usuario(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No puedes desactivar tu propio usuario",
         )
+
+    # Actualización atómica: evita que una lectura previa quede obsoleta si
+    # otra solicitud cambia el estado del usuario al mismo tiempo.
+    resultado = session.execute(
+        update(Usuario)
+        .where(Usuario.usuario_id == id)
+        .values(activo=False)
+        .execution_options(synchronize_session=False)
+    )
+    if resultado.rowcount != 1:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Usuario no encontrado",
+        )
+
+    session.commit()
     usuario = session.get(Usuario, id)
     if not usuario:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Usuario no encontrado",
         )
-    usuario.activo = False
-    session.add(usuario)
+    return usuario
+
+
+@router.patch(
+    "/usuarios/{id}/activar",
+    response_model=UsuarioRead,
+    status_code=status.HTTP_200_OK,
+    summary="Reactivar usuario (solo Administrador)",
+)
+async def activar_usuario(
+    id: int,
+    session: SessionDeDependencia,
+    token: Admin_Token_Dependencia,
+):
+    resultado = session.execute(
+        update(Usuario)
+        .where(Usuario.usuario_id == id)
+        .values(activo=True)
+        .execution_options(synchronize_session=False)
+    )
+    if resultado.rowcount != 1:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Usuario no encontrado",
+        )
+
     session.commit()
-    session.refresh(usuario)
+    usuario = session.get(Usuario, id)
+    if not usuario:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Usuario no encontrado",
+        )
     return usuario

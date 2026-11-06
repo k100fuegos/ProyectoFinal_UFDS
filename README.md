@@ -99,6 +99,8 @@ Los endpoints de detalle y las operaciones de escritura no se paginan.
 
 - No se presta un ejemplar que no esté en estado `Disponible` o que ya tenga un préstamo activo.
 - El cambio de estado del ejemplar a `Prestado` se hace con una actualización atómica para evitar dos préstamos simultáneos del mismo ejemplar.
+- La desactivación y reactivación de usuarios se hacen con actualizaciones atómicas (`PATCH /usuarios/{id}/desactivar` y `PATCH /usuarios/{id}/activar`). Editar los datos de un usuario no modifica su estado.
+- El `last_login` se actualiza solo si la cuenta sigue activa en la misma sentencia, de modo que una desactivación concurrente impide emitir el token de acceso.
 - Un préstamo identifica al lector, al ejemplar (y su libro), al usuario que lo registró, las fechas y el estado. La respuesta incluye `libro_id`.
 - Al registrar la devolución, el préstamo pasa a `Devuelto` y el ejemplar vuelve a `Disponible`.
 - Los préstamos activos cuya fecha de vencimiento ya pasó se marcan automáticamente como `Vencido` al consultar el historial o los préstamos activos.
@@ -109,13 +111,13 @@ Los endpoints de detalle y las operaciones de escritura no se paginan.
 
 ## 7. Pruebas automatizadas
 
-La suite cubre los 10 casos obligatorios del PDF y validaciones adicionales de las correcciones (usuario desactivado con token antiguo, cambio de rol, paginación, préstamos vencidos y estado de ejemplares).
+La suite cubre los 10 casos obligatorios del PDF y validaciones adicionales de las correcciones (usuario desactivado con token antiguo, cambio de rol, desactivación/activación idempotente, paginación, préstamos vencidos y estado de ejemplares).
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-Resultado esperado: **15 pruebas OK**. Las pruebas usan SQLite en memoria y no requieren MySQL ni datos manuales.
+Resultado esperado: **18 pruebas OK**. Las pruebas usan SQLite en memoria y no requieren MySQL ni datos manuales.
 
 ---
 

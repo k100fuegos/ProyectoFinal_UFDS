@@ -402,9 +402,94 @@ class ApiBibliotecariaTestCase(unittest.TestCase):
             headers={"Authorization": f"Bearer {token}"},
         )
         self.assertEqual(response.status_code, 403)
-        self.assertEqual(response.json()["detail"], "Usuario inactivo o no disponible")
+        self.assertEqual(response.json()["detail"], "Acceso denegado")
 
         self._login("temporal", "password123", status_code=403)
+
+    def _crear_usuario_temporal(self, username: str = "temporal"):
+        response = self.client.post(
+            "/usuarios",
+            json={
+                "nombre": "Usuario Temporal",
+                "username": username,
+                "correo": f"{username}@test.com",
+                "password": "password123",
+                "rol_id": 2,
+            },
+            headers=self.admin_headers,
+        )
+        self.assertEqual(response.status_code, 201, response.text)
+        return response.json()
+
+    def test_desactivar_y_activar_usuario_es_idempotente(self):
+        usuario = self._crear_usuario_temporal()
+        usuario_id = usuario["usuario_id"]
+
+        for _ in range(2):
+            response = self.client.patch(
+                f"/usuarios/{usuario_id}/desactivar", headers=self.admin_headers
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertFalse(response.json()["activo"])
+
+        for _ in range(2):
+            response = self.client.patch(
+                f"/usuarios/{usuario_id}/activar", headers=self.admin_headers
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertTrue(response.json()["activo"])
+
+        response = self.client.patch(
+            "/usuarios/999/desactivar", headers=self.admin_headers
+        )
+        self.assertEqual(response.status_code, 404)
+
+        response = self.client.patch(
+            "/usuarios/999/activar", headers=self.admin_headers
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_editar_usuario_no_reactiva_una_cuenta_desactivada(self):
+        usuario = self._crear_usuario_temporal("temporal_edit")
+        usuario_id = usuario["usuario_id"]
+
+        response = self.client.patch(
+            f"/usuarios/{usuario_id}/desactivar", headers=self.admin_headers
+        )
+        self.assertEqual(response.status_code, 200)
+
+        # Una edición de datos no debe cambiar el estado de la cuenta.
+        response = self.client.put(
+            f"/usuarios/{usuario_id}",
+            json={"nombre": "Usuario Temporal Editado"},
+            headers=self.admin_headers,
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            response.json()["nombre"], "Usuario Temporal Editado"
+        )
+        self.assertFalse(response.json()["activo"])
+
+        self._login("temporal_edit", "password123", status_code=403)
+
+    def test_activar_usuario_requiere_administrador(self):
+        usuario = self._crear_usuario_temporal("temporal_perm")
+        usuario_id = usuario["usuario_id"]
+
+        response = self.client.patch(
+            f"/usuarios/{usuario_id}/activar", headers=self.biblio_headers
+        )
+        self.assertEqual(response.status_code, 403)
+
+        response = self.client.patch(
+            f"/usuarios/{usuario_id}/desactivar", headers=self.biblio_headers
+        )
+        self.assertEqual(response.status_code, 403)
+
+        response = self.client.patch(
+            "/usuarios/1/desactivar", headers=self.admin_headers
+        )
+        self.assertEqual(response.status_code, 400)
 
     def test_rol_actualizado_se_toma_de_la_bd(self):
         response = self.client.post(
