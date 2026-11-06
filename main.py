@@ -3,8 +3,10 @@ from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from fastapi import FastAPI, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from config.db import crear_db_y_tablas
+from librerias.portadas import RUTA_PORTADAS
 from oauth.oauth import router as oauth_router
 from routers.router_roles import router as rol_router
 from routers.router_usuarios import router as usuario_router
@@ -47,6 +49,13 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+)
+
+# Portadas subidas por los usuarios.
+app.mount(
+    "/media/portadas",
+    StaticFiles(directory=RUTA_PORTADAS),
+    name="portadas",
 )
 
 

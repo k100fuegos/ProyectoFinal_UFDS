@@ -109,19 +109,35 @@ Los endpoints de detalle y las operaciones de escritura no se paginan.
 
 ---
 
-## 7. Pruebas automatizadas
+## 7. Portadas de libros
 
-La suite cubre los 10 casos obligatorios del PDF y validaciones adicionales de las correcciones (usuario desactivado con token antiguo, cambio de rol, desactivación/activación idempotente, paginación, préstamos vencidos y estado de ejemplares).
+Los endpoints de escritura de libros reciben `multipart/form-data`:
+
+- `POST /libros`: `isbn`, `titulo`, `categoria_id` y `autores_ids` (un campo repetido por cada autor) son obligatorios; `editorial`, `anio_publicacion` y `portada` son opcionales.
+- `PUT /libros/{id}`: todos los campos son opcionales. Si se envía `portada`, reemplaza la imagen anterior y elimina el archivo previo.
+
+La portada se valida, se redimensiona conservando su proporción sin ampliarla, se convierte a **WebP** y se guarda en `media/portadas`. En la base de datos solo se almacena el nombre del archivo, formado por el nombre original de la imagen y la fecha/hora de creación/edición en la zona horaria `America/El_Salvador`.
+
+- Peso máximo: `MAX_PORTADA_MB` (5 MB por defecto).
+- Dimensiones máximas: `PORTADA_ANCHO` × `PORTADA_ALTO` (600 × 900 px por defecto).
+- Las imágenes se sirven en `GET /media/portadas/<nombre_archivo>`.
+- La carpeta `media/portadas/` está incluida en `.gitignore`.
+
+---
+
+## 8. Pruebas automatizadas
+
+La suite cubre los 10 casos obligatorios del PDF y validaciones adicionales de las correcciones (usuario desactivado con token antiguo, cambio de rol, desactivación/activación idempotente, paginación, préstamos vencidos, estado de ejemplares y procesamiento de portadas).
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-Resultado esperado: **18 pruebas OK**. Las pruebas usan SQLite en memoria y no requieren MySQL ni datos manuales.
+Resultado esperado: **22 pruebas OK**. Las pruebas usan SQLite en memoria y no requieren MySQL ni datos manuales.
 
 ---
 
-## 8. Estructura del proyecto
+## 9. Estructura del proyecto
 
 ```text
 ├── config/
@@ -131,7 +147,8 @@ Resultado esperado: **18 pruebas OK**. Las pruebas usan SQLite en memoria y no r
 │   └── session_dependencia.py    # Dependencia de sesión SQLModel
 ├── librerias/
 │   ├── pwd.py                    # Hash de contraseñas con Argon2id
-│   └── rate_limiter.py           # Bloqueo tras intentos fallidos de login
+│   ├── rate_limiter.py           # Bloqueo tras intentos fallidos de login
+│   └── portadas.py               # Validación, redimensionado y conversión WebP de portadas
 ├── models/                       # 9 tablas SQLModel y esquemas Pydantic
 ├── oauth/
 │   └── oauth.py                  # Endpoint POST /oauth/login

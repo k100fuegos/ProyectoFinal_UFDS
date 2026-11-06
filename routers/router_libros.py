@@ -1,11 +1,20 @@
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import (
+    APIRouter,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    UploadFile,
+    status,
+)
 from sqlmodel import select
 from config.session_dependencia import SessionDeDependencia
 from config.security_dependencia import (
     Admin_Token_Dependencia,
     Biblio_Token_Dependencia,
 )
-from models.libro import Libro, LibroCreate, LibroUpdate, LibroRead
+from librerias.portadas import eliminar_portada, guardar_portada
+from models.libro import Libro, LibroRead
 from models.libro_autor import LibroAutor
 from models.autor import Autor
 from models.categoria import Categoria
@@ -46,6 +55,7 @@ def construir_libro_read(session: SessionDeDependencia, libro: Libro) -> LibroRe
         anio_publicacion=libro.anio_publicacion,
         categoria_id=libro.categoria_id,
         activo=libro.activo,
+        portada=libro.portada,
         autores_ids=autores_ids,
         ejemplares_disponibles=len(disponibles),
     )
@@ -129,41 +139,65 @@ async def get_libro(
     "/libros",
     response_model=LibroRead,
     status_code=status.HTTP_201_CREATED,
-    summary="Registrar un nuevo libro con su categoría y autores",
+    summary="Registrar un nuevo libro con su categoría, autores y portada",
 )
 async def create_libro(
-    datos: LibroCreate,
     session: SessionDeDependencia,
     token: Biblio_Token_Dependencia,
+    isbn: str = Form(..., min_length=10, max_length=17),
+    titulo: str = Form(..., min_length=1, max_length=255),
+    editorial: str | None = Form(None, max_length=150),
+    anio_publicacion: int | None = Form(None, ge=1000, le=2100),
+    categoria_id: int = Form(...),
+    autores_ids: list[int] = Form(
+        ...,
+        description="ID de cada autor; repita el campo para varios autores",
+    ),
+    portada: UploadFile | None = File(
+        None,
+        description="Imagen de portada (JPG, PNG, WebP, etc.). Se convierte a WebP.",
+    ),
 ):
-    if session.exec(select(Libro).where(Libro.isbn == datos.isbn)).first():
+    if session.exec(select(Libro).where(Libro.isbn == isbn)).first():
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Ya existe un libro registrado con ese ISBN",
         )
 
-    validar_categoria_y_autores(session, datos.categoria_id, datos.autores_ids)
+    validar_categoria_y_autores(session, categoria_id, autores_ids)
+
+    nombre_portada = None
+    if portada is not None and portada.filename:
+        nombre_portada = await guardar_portada(portada, titulo)
 
     libro = Libro(
-        isbn=datos.isbn,
-        titulo=datos.titulo,
-        editorial=datos.editorial,
-        anio_publicacion=datos.anio_publicacion,
-        categoria_id=datos.categoria_id,
+        isbn=isbn,
+        titulo=titulo,
+        editorial=editorial,
+        anio_publicacion=anio_publicacion,
+        categoria_id=categoria_id,
+        portada=nombre_portada,
         activo=True,
     )
-    session.add(libro)
-    session.flush()
 
-    for autor_id in dict.fromkeys(datos.autores_ids):
-        session.add(
-            LibroAutor(
-                libro_id=libro.libro_id,  # type: ignore
-                autor_id=autor_id,
+    try:
+        session.add(libro)
+        session.flush()
+
+        for autor_id in dict.fromkeys(autores_ids):
+            session.add(
+                LibroAutor(
+                    libro_id=libro.libro_id,  # type: ignore
+                    autor_id=autor_id,
+                )
             )
-        )
 
-    session.commit()
+        session.commit()
+    except Exception:
+        session.rollback()
+        eliminar_portada(nombre_portada)
+        raise
+
     session.refresh(libro)
     return construir_libro_read(session, libro)
 
@@ -172,21 +206,33 @@ async def create_libro(
     "/libros/{libro_id}",
     response_model=LibroRead,
     status_code=status.HTTP_200_OK,
-    summary="Actualizar datos de un libro y sus autores",
+    summary="Actualizar los datos, autores y portada de un libro",
 )
 async def update_libro(
     libro_id: int,
-    datos: LibroUpdate,
     session: SessionDeDependencia,
     token: Biblio_Token_Dependencia,
+    isbn: str | None = Form(None, min_length=10, max_length=17),
+    titulo: str | None = Form(None, min_length=1, max_length=255),
+    editorial: str | None = Form(None, max_length=150),
+    anio_publicacion: int | None = Form(None, ge=1000, le=2100),
+    categoria_id: int | None = Form(None),
+    autores_ids: list[int] | None = Form(
+        None,
+        description="ID de cada autor; omita el campo para no cambiar los autores",
+    ),
+    activo: bool | None = Form(None),
+    portada: UploadFile | None = File(
+        None,
+        description="Nueva portada. Si se envía, reemplaza la anterior.",
+    ),
 ):
     libro = obtener_libro_o_404(session, libro_id)
-    datos_actualizados = datos.model_dump(exclude_unset=True)
 
-    if "isbn" in datos_actualizados and datos_actualizados["isbn"]:
+    if isbn is not None:
         duplicado = session.exec(
             select(Libro).where(
-                Libro.isbn == datos_actualizados["isbn"],
+                Libro.isbn == isbn,
                 Libro.libro_id != libro_id,
             )
         ).first()
@@ -196,29 +242,54 @@ async def update_libro(
                 detail="Ya existe otro libro con ese ISBN",
             )
 
-    validar_categoria_y_autores(
-        session,
-        datos_actualizados.get("categoria_id"),
-        datos_actualizados.get("autores_ids"),
-    )
+    validar_categoria_y_autores(session, categoria_id, autores_ids)
 
-    autores_nuevos = datos_actualizados.pop("autores_ids", None)
-    for campo, valor in datos_actualizados.items():
-        setattr(libro, campo, valor)
+    portada_anterior = libro.portada
+    nombre_portada = None
+    if portada is not None and portada.filename:
+        nombre_portada = await guardar_portada(portada, titulo or libro.titulo)
 
-    if autores_nuevos is not None:
-        enlaces_actuales = session.exec(
-            select(LibroAutor).where(LibroAutor.libro_id == libro_id)
-        ).all()
-        for enlace in enlaces_actuales:
-            session.delete(enlace)
-        session.flush()
-        for autor_id in dict.fromkeys(autores_nuevos):
-            session.add(LibroAutor(libro_id=libro_id, autor_id=autor_id))
+    try:
+        if isbn is not None:
+            libro.isbn = isbn
+        if titulo is not None:
+            libro.titulo = titulo
+        if editorial is not None:
+            libro.editorial = editorial or None
+        if anio_publicacion is not None:
+            libro.anio_publicacion = anio_publicacion
+        if categoria_id is not None:
+            libro.categoria_id = categoria_id
+        if activo is not None:
+            libro.activo = activo
+        if nombre_portada is not None:
+            libro.portada = nombre_portada
 
-    session.add(libro)
-    session.commit()
+        if autores_ids is not None:
+            enlaces_actuales = session.exec(
+                select(LibroAutor).where(LibroAutor.libro_id == libro_id)
+            ).all()
+            for enlace in enlaces_actuales:
+                session.delete(enlace)
+            session.flush()
+            for autor_id in dict.fromkeys(autores_ids):
+                session.add(LibroAutor(libro_id=libro_id, autor_id=autor_id))
+
+        session.add(libro)
+        session.commit()
+    except Exception:
+        session.rollback()
+        eliminar_portada(nombre_portada)
+        raise
+
     session.refresh(libro)
+    if (
+        nombre_portada is not None
+        and portada_anterior
+        and portada_anterior != nombre_portada
+    ):
+        eliminar_portada(portada_anterior)
+
     return construir_libro_read(session, libro)
 
 
